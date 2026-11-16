@@ -1,0 +1,70 @@
+name: Build
+
+# Tiap kali kode diunggah, GitHub menjalankan tes lalu membuat OxideCut.exe untuk Windows.
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Tes dan build Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Jalankan tes
+        run: cargo test --workspace
+
+      - name: Build versi rilis
+        run: cargo build --release -p oxidecut-app
+
+      - name: Kumpulkan berkas
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/oxidecut.exe dist/OxideCut.exe
+          Copy-Item LICENSE dist/LICENSE.txt
+          Copy-Item assets/fonts/FluentSystemIcons-LICENSE.txt dist/FluentSystemIcons-LICENSE.txt
+
+      - name: Simpan hasil build
+        uses: actions/upload-artifact@v4
+        with:
+          name: OxideCut-windows-x64
+          path: dist/
+
+  # Hanya di cabang main: perbarui rilis percobaan "dev" supaya ada satu tautan unduh tetap.
+  release:
+    name: Rilis percobaan
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: OxideCut-windows-x64
+          path: OxideCut
+
+      - name: Buat ZIP
+        run: zip -r OxideCut-windows-x64.zip OxideCut
+
+      - name: Perbarui rilis dev
+        run: |
+          gh release delete dev --cleanup-tag --yes || true
+          gh release create dev OxideCut-windows-x64.zip \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "OxideCut versi percobaan" \
+            --notes "Build otomatis dari cabang main. Belum stabil. Belum ditandatangani, jadi Windows mungkin menampilkan peringatan saat pertama dibuka."
