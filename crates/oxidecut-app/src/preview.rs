@@ -1,20 +1,21 @@
 //! Pratinjau di tengah layar, tombol putar, dan keterangan suara.
 //!
-//! CATATAN: pratinjau ini belum memutar video asli. Tiap klip digambar sebagai
-//! pemandangan sederhana berwarna (langit, matahari, tanah) supaya efek dan
-//! transisi tetap terlihat. Saat FFmpeg dipasang, `paint_scene` adalah satu-satunya
-//! fungsi yang perlu diganti dengan frame video sungguhan.
+//! Klip dari berkas video ditampilkan sebagai video asli (lihat `video.rs`).
+//! Klip contoh bawaan, yang tidak punya berkas, digambar sebagai pemandangan
+//! sederhana berwarna oleh `paint_scene`.
 
 use eframe::egui::{
     self, Align, Align2, Color32, FontId, Frame, Layout, Margin, Painter, Pos2, Rect, RichText,
     Sense, Stroke, StrokeKind, Ui,
 };
-use oxidecut_core::{Audible, Clip, Effect, Ms, Transition};
+use oxidecut_core::{Audible, Clip, Effect, Ms, Timeline, Transition};
 
 use crate::app::{App, Ratio};
+use crate::ffmpeg;
 use crate::icons;
 use crate::labels;
 use crate::theme;
+use crate::video::{self, FrameRequest};
 use crate::widgets;
 
 /// Transisi berlangsung dari 300 ms sebelum sambungan sampai 300 ms sesudahnya.
@@ -47,10 +48,13 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 /// Baris atas: keterangan di kiri, pilihan rasio di kanan.
 fn ratio_row(app: &mut App, ui: &mut Ui) {
     ui.horizontal(|ui| {
-        widgets::hint(
-            ui,
-            "Pratinjau contoh. Video asli belum diputar di versi ini.",
-        );
+        // Tanpa FFmpeg, video asli tidak bisa ditampilkan. Beri tahu pengguna.
+        if ffmpeg::tools().is_none() {
+            widgets::hint(
+                ui,
+                "FFmpeg tidak ditemukan. Video tampil sebagai gambar contoh.",
+            );
+        }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             // Tata letak kanan-ke-kiri, jadi urutannya dibalik.
@@ -73,49 +77,16 @@ fn fit_rect(area: Rect, width_over_height: f32) -> Rect {
     Rect::from_center_size(area.center(), egui::vec2(width, height))
 }
 
-fn paint_picture(app: &App, ui: &Ui, picture: Rect) {
+fn paint_picture(app: &mut App, ui: &Ui, picture: Rect) {
     let painter = ui.painter_at(picture);
     painter.rect_filled(picture, 0.0, Color32::BLACK);
 
-    let tl = app.timeline();
-    let video_len = tl.video_len();
-    if video_len == 0 {
-        painter.text(
-            picture.center(),
-            Align2::CENTER_CENTER,
-            "Timeline kosong",
-            FontId::proportional(13.0),
-            theme::MUTED,
-        );
-        return;
-    }
+    // Salinan isi timeline (kecil), supaya bebas memakai `app.video` sambil menggambar.
+    let tl = app.timeline().clone();
 
-    // Di ujung video, tetap tampilkan gambar terakhir.
-    let t = app.playhead_ms().min(video_len - 1);
-
-    let mut shown_name = String::new();
-    let mut shown_transition = None;
-
-    if let Some((kind, edge, left_index)) = tl.transition_at(t, TRANSITION_HALF_MS) {
-        let from = &tl.clips()[left_index];
-        if let Some(to) = tl.clips().get(left_index + 1) {
-            let begin = edge.saturating_sub(TRANSITION_HALF_MS) as f32;
-            let progress = ((t as f32 - begin) / (2 * TRANSITION_HALF_MS) as f32).clamp(0.0, 1.0);
-            paint_transition(&painter, picture, from, to, kind, progress);
-            shown_name = if progress < 0.5 {
-                from.name.clone()
-            } else {
-                to.name.clone()
-            };
-            shown_transition = Some(kind);
-        }
-    }
-    if shown_transition.is_none() {
-        if let Some((_, clip)) = tl.clip_at(t) {
-            paint_scene(&painter, picture, picture, clip, 1.0);
-            shown_name = clip.name.clone();
-        }
-    }
+    app.video.begin_paint();
+    let (shown_name, shown_transition) = paint_video(app, ui, &painter, picture, &tl);
+    app.video.end_paint();
 
     // Teks di atas video, disusun dari bawah ke atas.
     let mut bottom = picture.bottom() - picture.height() * 0.12;
@@ -139,14 +110,16 @@ fn paint_picture(app: &App, ui: &Ui, picture: Rect) {
     }
 
     // Keterangan kecil di pojok.
-    widgets::paint_chip(
-        &painter,
-        picture.left_top() + egui::vec2(8.0, 8.0),
-        Align2::LEFT_TOP,
-        &shown_name,
-        Color32::from_black_alpha(130),
-        theme::TEXT,
-    );
+    if !shown_name.is_empty() {
+        widgets::paint_chip(
+            &painter,
+            picture.left_top() + egui::vec2(8.0, 8.0),
+            Align2::LEFT_TOP,
+            &shown_name,
+            Color32::from_black_alpha(130),
+            theme::TEXT,
+        );
+    }
     if let Some(kind) = shown_transition {
         widgets::paint_chip(
             &painter,
@@ -166,43 +139,197 @@ fn paint_picture(app: &App, ui: &Ui, picture: Rect) {
     );
 }
 
-/// Menggambar pergantian dari klip `from` ke klip `to`.
-/// `progress` berjalan dari 0.0 (masih `from`) ke 1.0 (sudah `to`).
-fn paint_transition(
+/// Menggambar video pada posisi garis oranye: satu klip, atau dua klip saat transisi.
+/// Mengembalikan nama klip yang tampil dan transisi yang sedang berlangsung.
+fn paint_video(
+    app: &mut App,
+    ui: &Ui,
     painter: &Painter,
     picture: Rect,
-    from: &Clip,
-    to: &Clip,
+    tl: &Timeline,
+) -> (String, Option<Transition>) {
+    let video_len = tl.video_len();
+    if video_len == 0 {
+        painter.text(
+            picture.center(),
+            Align2::CENTER_CENTER,
+            "Timeline kosong",
+            FontId::proportional(13.0),
+            theme::MUTED,
+        );
+        return (String::new(), None);
+    }
+
+    // Di ujung video, tetap tampilkan gambar terakhir.
+    let t = app.playhead_ms().min(video_len - 1);
+
+    // Sedang di dalam transisi: gambar dua klip.
+    if let Some((kind, edge, left_index)) = tl.transition_at(t, TRANSITION_HALF_MS) {
+        if let Some(to_clip) = tl.clips().get(left_index + 1) {
+            let from_clip = &tl.clips()[left_index];
+            let from = Shot {
+                clip: from_clip,
+                start: edge - from_clip.len,
+            };
+            let to = Shot {
+                clip: to_clip,
+                start: edge,
+            };
+
+            let begin = edge.saturating_sub(TRANSITION_HALF_MS) as f32;
+            let progress = ((t as f32 - begin) / (2 * TRANSITION_HALF_MS) as f32).clamp(0.0, 1.0);
+            paint_transition(app, ui, painter, picture, &from, &to, t, kind, progress);
+
+            let name = if progress < 0.5 {
+                &from_clip.name
+            } else {
+                &to_clip.name
+            };
+            return (name.clone(), Some(kind));
+        }
+    }
+
+    // Keadaan biasa: gambar satu klip.
+    let Some((start, clip)) = tl.clip_at(t) else {
+        return (String::new(), None);
+    };
+    let shot = Shot { clip, start };
+    paint_clip(app, ui, painter, picture, picture, &shot, t, 1.0);
+
+    // Saat diputar, siapkan klip berikutnya sedikit sebelum gilirannya,
+    // supaya pergantian klip tidak tersendat.
+    let remaining = start + clip.len - t;
+    if app.playing && remaining < 1_500 {
+        if let Some(index) = tl.clip_index(clip.id) {
+            if let Some(next_clip) = tl.clips().get(index + 1) {
+                let next = Shot {
+                    clip: next_clip,
+                    start: start + clip.len,
+                };
+                prepare_clip(app, ui, &next, t);
+            }
+        }
+    }
+
+    (clip.name.clone(), None)
+}
+
+/// Sebuah klip beserta waktu mulainya di timeline.
+struct Shot<'a> {
+    clip: &'a Clip,
+    start: Ms,
+}
+
+impl Shot<'_> {
+    /// Waktu di dalam berkas sumber untuk waktu timeline `t`.
+    /// Sebelum klip mulai, hasilnya frame pertama; setelah klip habis, frame terakhir.
+    fn source_ms(&self, t: Ms) -> Ms {
+        let inside = t.saturating_sub(self.start);
+        let last = self.clip.len.saturating_sub(1);
+        self.clip.source_in + inside.min(last)
+    }
+}
+
+/// Apakah klip ini bisa ditampilkan sebagai video asli?
+/// Klip contoh (tanpa berkas) dan komputer tanpa FFmpeg memakai gambar contoh.
+fn has_real_video(clip: &Clip) -> bool {
+    clip.source.is_some() && ffmpeg::tools().is_some()
+}
+
+/// Permintaan frame untuk `shot` pada waktu timeline `t`.
+fn frame_request<'a>(app: &App, shot: &'a Shot<'a>, t: Ms) -> Option<FrameRequest<'a>> {
+    if !has_real_video(shot.clip) {
+        return None;
+    }
+    let path = shot.clip.source.as_ref()?;
+    Some(FrameRequest {
+        clip_id: shot.clip.id,
+        path,
+        source_ms: shot.source_ms(t),
+        effect: shot.clip.effect,
+        size: video::frame_size(app.ratio),
+    })
+}
+
+/// Menggambar satu klip pada waktu timeline `t`.
+///
+/// - `visible`: bagian layar yang boleh digambari.
+/// - `frame`: posisi dan ukuran gambar utuh (boleh bergeser atau mengecil saat transisi).
+/// - `opacity`: 1.0 penuh, 0.0 tembus pandang.
+#[allow(clippy::too_many_arguments)]
+fn paint_clip(
+    app: &mut App,
+    ui: &Ui,
+    painter: &Painter,
+    visible: Rect,
+    frame: Rect,
+    shot: &Shot<'_>,
+    t: Ms,
+    opacity: f32,
+) {
+    let Some(request) = frame_request(app, shot, t) else {
+        paint_scene(painter, visible, frame, shot.clip, opacity);
+        return;
+    };
+
+    // Selama frame pertama belum datang, layar dibiarkan hitam.
+    if let Some(texture) = app.video.frame(ui.ctx(), request) {
+        let whole_image = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+        let tint = Color32::WHITE.gamma_multiply(opacity);
+        painter
+            .with_clip_rect(visible)
+            .image(texture, frame, whole_image, tint);
+    }
+}
+
+/// Menyalakan pemutar untuk klip yang sebentar lagi tampil, tanpa menggambarnya.
+fn prepare_clip(app: &mut App, ui: &Ui, shot: &Shot<'_>, t: Ms) {
+    if let Some(request) = frame_request(app, shot, t) {
+        app.video.frame(ui.ctx(), request);
+    }
+}
+
+/// Menggambar pergantian dari klip `from` ke klip `to`.
+/// `progress` berjalan dari 0.0 (masih `from`) ke 1.0 (sudah `to`).
+#[allow(clippy::too_many_arguments)]
+fn paint_transition(
+    app: &mut App,
+    ui: &Ui,
+    painter: &Painter,
+    picture: Rect,
+    from: &Shot<'_>,
+    to: &Shot<'_>,
+    t: Ms,
     kind: Transition,
     progress: f32,
 ) {
     match kind {
         Transition::Fade => {
-            paint_scene(painter, picture, picture, from, 1.0);
-            paint_scene(painter, picture, picture, to, progress);
+            paint_clip(app, ui, painter, picture, picture, from, t, 1.0);
+            paint_clip(app, ui, painter, picture, picture, to, t, progress);
         }
         Transition::Slide => {
             let shift = picture.width() * progress;
             let from_frame = picture.translate(egui::vec2(-shift, 0.0));
             let to_frame = picture.translate(egui::vec2(picture.width() - shift, 0.0));
-            paint_scene(painter, picture, from_frame, from, 1.0);
-            paint_scene(painter, picture, to_frame, to, 1.0);
+            paint_clip(app, ui, painter, picture, from_frame, from, t, 1.0);
+            paint_clip(app, ui, painter, picture, to_frame, to, t, 1.0);
         }
         Transition::Zoom => {
-            paint_scene(painter, picture, picture, from, 1.0);
+            paint_clip(app, ui, painter, picture, picture, from, t, 1.0);
             let small = Rect::from_center_size(picture.center(), picture.size() * progress);
-            paint_scene(painter, small, small, to, 1.0);
+            paint_clip(app, ui, painter, small, small, to, t, 1.0);
         }
         Transition::Wipe => {
-            paint_scene(painter, picture, picture, from, 1.0);
+            paint_clip(app, ui, painter, picture, picture, from, t, 1.0);
             let right = picture.left() + picture.width() * progress;
             let revealed = Rect::from_min_max(picture.min, Pos2::new(right, picture.bottom()));
-            paint_scene(painter, revealed, picture, to, 1.0);
+            paint_clip(app, ui, painter, revealed, picture, to, t, 1.0);
         }
     }
 }
 
-/// Menggambar satu klip sebagai pemandangan sederhana.
+/// Menggambar klip contoh sebagai pemandangan sederhana.
 ///
 /// - `visible`: bagian layar yang boleh digambari.
 /// - `frame`: posisi dan ukuran gambar utuh (boleh lebih besar atau bergeser dari `visible`).

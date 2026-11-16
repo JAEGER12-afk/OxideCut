@@ -104,6 +104,9 @@ fn clip_panel(app: &mut App, ui: &mut Ui, id: Id) {
                 }
             }
         }
+        ClipAudio::NoAudio => {
+            widgets::hint(ui, "Video ini tidak punya suara.");
+        }
         ClipAudio::Removed => {
             widgets::hint(ui, "Suara klip ini sudah dihapus.");
             let button = widgets::icon_button(icons::SPEAKER, "Pulihkan suara");

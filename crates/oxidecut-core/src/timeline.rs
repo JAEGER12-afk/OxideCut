@@ -60,6 +60,8 @@ pub enum ClipAudio {
     Detached { group: Id },
     /// Suara sudah dihapus; videonya bisu.
     Removed,
+    /// Berkas sumbernya memang tidak punya suara.
+    NoAudio,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -527,6 +529,13 @@ impl Timeline {
         Ok(first)
     }
 
+    /// Menandai klip yang berkas sumbernya tidak punya suara.
+    /// Dipanggil sekali, tepat setelah klip ditaruh di timeline.
+    pub fn set_no_audio(&mut self, clip_id: Id) -> Result<(), EditError> {
+        self.clip_mut(clip_id)?.audio = ClipAudio::NoAudio;
+        Ok(())
+    }
+
     /// Memulihkan suara klip yang sudah dihapus.
     pub fn restore_clip_audio(&mut self, clip_id: Id) -> Result<(), EditError> {
         let clip = self.clip_mut(clip_id)?;
@@ -828,6 +837,16 @@ mod tests {
         assert!(t.audible_at(100).is_empty());
         t.set_clip_volume(a, 250).unwrap();
         assert_eq!(t.clip(a).unwrap().volume, 100);
+    }
+
+    #[test]
+    fn clip_without_audio_is_silent_and_cannot_be_detached() {
+        let (mut t, [a, _, _]) = three_clips();
+        t.set_no_audio(a).unwrap();
+        assert!(t.audible_at(100).is_empty());
+        assert_eq!(t.detach_audio(a), Err(EditError::AudioNotAttached));
+        t.restore_clip_audio(a).unwrap();
+        assert_eq!(t.clip(a).unwrap().audio, ClipAudio::NoAudio);
     }
 
     #[test]

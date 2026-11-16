@@ -14,10 +14,11 @@ Ini versi awal. Yang sudah bisa dicoba:
 - Tambah teks (isi, ukuran, warna)
 - Efek dan transisi dengan contoh langsung
 - Pisahkan audio dari video, lalu seret audionya ke mana saja
-- Impor berkas ke panel Media
+- Impor video dan audio: tombol Impor, atau seret berkas ke jendela aplikasi
+- Pratinjau memutar video asli, lengkap dengan efek dan transisi
 
-Yang belum: memutar video asli, suara, ekspor MP4, dan simpan proyek.
-Untuk sementara tiap klip tampil sebagai gambar contoh berwarna.
+Yang belum: suara, ekspor MP4, dan simpan proyek.
+Klip contoh bawaan (Klip A sampai D) tampil sebagai gambar berwarna.
 
 ## Unduh
 
@@ -44,7 +45,8 @@ Pintasan: Spasi (putar), Ctrl+Z dan Ctrl+Y, Delete, panah kiri dan kanan.
 
 ## Build sendiri
 
-Perlu [Rust](https://rustup.rs) versi stabil terbaru.
+Perlu [Rust](https://rustup.rs) versi stabil terbaru. Supaya video asli tampil,
+`ffmpeg` dan `ffprobe` harus terpasang di komputer atau ada di folder `ffmpeg` di samping aplikasi.
 
 ```
 cargo run --release -p oxidecut-app
@@ -59,4 +61,9 @@ Kode OxideCut berlisensi [MIT](LICENSE).
 
 Ikon memakai [Fluent System Icons](https://github.com/microsoft/fluentui-system-icons)
 dari Microsoft, lisensi MIT (`assets/fonts/FluentSystemIcons-LICENSE.txt`).
+
+Untuk membaca video, OxideCut menjalankan [FFmpeg](https://ffmpeg.org) sebagai program terpisah.
+ZIP Windows menyertakan FFmpeg versi LGPL tanpa perubahan di folder `ffmpeg`,
+diambil dari [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) (varian `lgpl-shared`).
+Lisensinya ada di `ffmpeg/LICENSE.txt`. FFmpeg tidak digabung ke dalam `OxideCut.exe`.
 Antarmuka dibangun dengan [egui](https://github.com/emilk/egui).
