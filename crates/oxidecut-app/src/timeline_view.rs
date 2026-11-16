@@ -302,7 +302,7 @@ fn video_clips(app: &mut App, ui: &mut Ui, painter: &Painter, tracks: &Tracks, t
             label.push_str(&format!("  ·  {}", labels::effect(clip.effect)));
         }
         match clip.audio {
-            ClipAudio::Attached => {}
+            ClipAudio::Attached | ClipAudio::NoAudio => {}
             ClipAudio::Detached { .. } => label.push_str("  ·  Audio dipisah"),
             ClipAudio::Removed => label.push_str("  ·  Tanpa suara"),
         }

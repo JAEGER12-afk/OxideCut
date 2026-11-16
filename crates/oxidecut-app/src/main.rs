@@ -6,7 +6,9 @@
 //! - `theme.rs`      warna dan gaya.
 //! - `icons.rs`      ikon Fluent dari Microsoft.
 //! - `labels.rs`     teks bahasa Indonesia dan format waktu.
-//! - `media.rs`      daftar media dan pembacaan durasi berkas.
+//! - `media.rs`      daftar media.
+//! - `ffmpeg.rs`     menemukan dan menjalankan FFmpeg (program terpisah, bukan pustaka).
+//! - `video.rs`      mengambil gambar video asli untuk pratinjau.
 //! - `widgets.rs`    tombol dan potongan tampilan kecil yang dipakai bersama.
 //! - `top_bar.rs`    bilah atas dan jendela Ekspor.
 //! - `media_panel.rs` panel kiri.
@@ -21,6 +23,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod ffmpeg;
 mod icons;
 mod inspector;
 mod labels;
@@ -30,6 +33,7 @@ mod preview;
 mod theme;
 mod timeline_view;
 mod top_bar;
+mod video;
 mod widgets;
 
 use eframe::egui;

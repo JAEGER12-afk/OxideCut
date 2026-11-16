@@ -3,11 +3,14 @@
 //! Panel-panel (berkas lain) hanya menggambar dan memanggil aksi di sini.
 //! Aksi di sini memanggil `oxidecut-core` lalu menampilkan pesan singkat.
 
+use std::path::PathBuf;
+
 use eframe::egui;
 use oxidecut_core::{AudioKind, Editor, Effect, Id, Ms, Timeline, Transition, AUDIO_LANES};
 
 use crate::labels;
 use crate::media::{self, MediaItem, MediaKind};
+use crate::video::VideoPool;
 use crate::{inspector, media_panel, preview, timeline_view, top_bar};
 
 /// Apa yang sedang dipilih pengguna. Panel kanan mengikuti ini.
@@ -69,6 +72,8 @@ pub struct App {
     pub playing: bool,
     pub ratio: Ratio,
     pub audio_drag: Option<AudioDrag>,
+    /// Pemutar video asli untuk pratinjau.
+    pub video: VideoPool,
     pub export_open: bool,
     pub export_height: u32,
     /// Minta kotak isian teks di panel kanan mengambil fokus pada frame berikutnya.
@@ -83,7 +88,7 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        Self {
+        let mut app = Self {
             editor: Editor::new(sample_project()),
             library: media::sample_library(),
             selection: Selection::None,
@@ -91,6 +96,7 @@ impl App {
             playing: false,
             ratio: Ratio::Portrait,
             audio_drag: None,
+            video: VideoPool::new(),
             export_open: false,
             export_height: 1080,
             focus_text_box: false,
@@ -98,7 +104,15 @@ impl App {
             toast_until: 0.0,
             now: 0.0,
             next_tint: 4,
+        };
+
+        // Berkas yang diberikan saat aplikasi dibuka (misalnya lewat "Open with")
+        // langsung masuk ke panel Media.
+        let files: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+        if !files.is_empty() {
+            app.import_paths(&files);
         }
+        app
     }
 
     pub fn timeline(&self) -> &Timeline {
@@ -229,7 +243,11 @@ impl App {
         match item.kind {
             MediaKind::Video => {
                 let result = self.editor.edit(|tl| {
-                    Ok(tl.push_clip(&item.name, item.len, item.tint, item.path.clone()))
+                    let id = tl.push_clip(&item.name, item.len, item.tint, item.path.clone());
+                    if !item.has_audio {
+                        tl.set_no_audio(id)?;
+                    }
+                    Ok(id)
                 });
                 if let Ok(id) = result {
                     self.selection = Selection::Clip(id);
@@ -266,8 +284,13 @@ impl App {
             return;
         };
 
+        self.import_paths(&paths);
+    }
+
+    /// Memasukkan berkas-berkas ke panel Media.
+    pub fn import_paths(&mut self, paths: &[PathBuf]) {
         let mut unknown_length = 0;
-        for path in &paths {
+        for path in paths {
             let item = media::from_file(path, self.next_tint);
             self.next_tint = self.next_tint.wrapping_add(1);
             if !item.len_known {
@@ -278,7 +301,7 @@ impl App {
 
         if unknown_length > 0 {
             self.say(format!(
-                "{} media diimpor. {} belum terbaca durasinya, dianggap 5 detik",
+                "{} media diimpor. {} tidak terbaca durasinya, dianggap 5 detik",
                 paths.len(),
                 unknown_length
             ));
@@ -409,6 +432,18 @@ impl App {
 
         if self.now < self.toast_until {
             ui.ctx().request_repaint_after_secs(0.2);
+        }
+
+        // Berkas yang diseret dari Explorer lalu dilepas di jendela aplikasi.
+        let dropped: Vec<PathBuf> = ui.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|file| file.path().to_owned())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            self.import_paths(&dropped);
         }
 
         self.drop_stale_selection();

@@ -26,10 +26,38 @@ jobs:
       - name: Build versi rilis
         run: cargo build --release -p oxidecut-app
 
+      # FFmpeg disertakan sebagai program terpisah di folder "ffmpeg" (tidak digabung ke OxideCut.exe).
+      # Wajib varian LGPL ("lgpl-shared"). JANGAN ganti ke varian "gpl".
+      # Kalau unduhan ini gagal karena versinya sudah tidak disediakan, lihat daftar terbaru di
+      # https://github.com/BtbN/FFmpeg-Builds/releases/tag/latest lalu sesuaikan FFMPEG_ZIP.
+      - name: Unduh FFmpeg (LGPL)
+        shell: pwsh
+        env:
+          FFMPEG_ZIP: ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$env:FFMPEG_ZIP"
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-unzipped
+          $root = (Get-ChildItem ffmpeg-unzipped -Directory | Select-Object -First 1).FullName
+          New-Item -ItemType Directory -Force dist/ffmpeg | Out-Null
+          Copy-Item "$root/bin/ffmpeg.exe" dist/ffmpeg/
+          Copy-Item "$root/bin/ffprobe.exe" dist/ffmpeg/
+          Copy-Item "$root/bin/*.dll" dist/ffmpeg/
+          Copy-Item "$root/LICENSE.txt" dist/ffmpeg/LICENSE.txt
+          Set-Content dist/ffmpeg/SUMBER.txt "FFmpeg (LGPL), tidak diubah. Build: https://github.com/BtbN/FFmpeg-Builds  ($env:FFMPEG_ZIP). Kode sumber: https://ffmpeg.org"
+
+      - name: Pastikan FFmpeg yang disertakan bukan versi GPL dan bisa jalan
+        shell: pwsh
+        run: |
+          $config = & dist/ffmpeg/ffmpeg.exe -hide_banner -buildconf | Out-String
+          if ($config -match "--enable-gpl" -or $config -match "--enable-nonfree") {
+            throw "FFmpeg ini bukan build LGPL."
+          }
+          & dist/ffmpeg/ffprobe.exe -version | Select-Object -First 1
+
       - name: Kumpulkan berkas
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/oxidecut.exe dist/OxideCut.exe
           Copy-Item LICENSE dist/LICENSE.txt
           Copy-Item assets/fonts/FluentSystemIcons-LICENSE.txt dist/FluentSystemIcons-LICENSE.txt

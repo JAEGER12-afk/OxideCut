@@ -16,6 +16,9 @@ Pemilik proyek adalah desainer (bukan programmer) dan menguji lewat `.exe` hasil
 4. **Bahasa.** Teks antarmuka dan komentar: bahasa Indonesia. Nama fungsi dan variabel: bahasa Inggris.
 5. **Ikon.** Hanya Fluent System Icons dari Microsoft. Cara menambah ikon ada di `crates/oxidecut-app/src/icons.rs`.
 6. **Desain acuan.** `docs/prototipe-ui.html` adalah prototipe yang sudah disetujui pemilik. Buka di browser.
+7. **FFmpeg hanya sebagai program terpisah.** Aplikasi menjalankan `ffmpeg.exe` dan `ffprobe.exe` lalu membaca
+   hasilnya (lihat `ffmpeg.rs`). Jangan menautkan pustaka FFmpeg ke aplikasi (jangan pakai crate seperti
+   `ffmpeg-next`), dan build yang disertakan wajib varian LGPL. Ini keputusan pemilik soal lisensi.
 
 ## Peta proyek
 
@@ -26,6 +29,8 @@ crates/oxidecut-core/   Inti timeline. Murni Rust, tanpa UI, tanpa FFmpeg.
 crates/oxidecut-app/    Aplikasi desktop (egui/eframe 0.37, renderer wgpu).
   src/main.rs           Membuka jendela. Di atasnya ada peta berkas aplikasi.
   src/app.rs            Keadaan aplikasi dan semua aksi pengguna.
+  src/ffmpeg.rs         Menemukan dan menjalankan FFmpeg; info berkas; rangkaian filter efek.
+  src/video.rs          Frame video asli untuk pratinjau (satu proses FFmpeg per klip yang tampil).
   src/*_panel.rs, preview.rs, inspector.rs, timeline_view.rs   Satu berkas per bagian layar.
 assets/fonts/           Font ikon Fluent (MIT, Microsoft).
 .github/workflows/      Tes + build Windows otomatis.
@@ -39,7 +44,8 @@ core mengubah `Timeline` atau menolak dengan `EditError` → `app.rs` menampilka
 - Waktu dalam milidetik (`Ms = u64`).
 - Jalur video magnetik: klip selalu rapat berurutan, tanpa celah.
 - Transisi disimpan di klip kiri sebuah sambungan (`Clip::transition_out`).
-- Suara klip: `Attached` (bawaan), `Detached { group }` (dipisah ke jalur Audio), atau `Removed`.
+- Suara klip: `Attached` (bawaan), `Detached { group }` (dipisah ke jalur Audio), `Removed`,
+  atau `NoAudio` (berkasnya memang tanpa suara).
 - Audio terpisah bebas dipindah di dua lajur dan tidak boleh bertumpuk dalam satu lajur.
 
 ## Perintah
@@ -52,20 +58,26 @@ cargo run -p oxidecut-app       # menjalankan aplikasi
 ```
 
 Di Linux tanpa layar, tampilan bisa diperiksa dengan `Xvfb` lalu `import -window root shot.png`.
+Berkas yang ditulis setelah nama program langsung masuk panel Media: `oxidecut video.mp4`.
 
 ## Status
 
-Sudah jalan (dengan klip contoh berwarna, belum video asli):
-timeline, potong, hapus, teks, efek, transisi beserta animasinya di pratinjau,
-pisahkan audio, seret audio dengan tempelan otomatis, undo/redo, impor berkas ke panel Media
-(durasi terbaca untuk keluarga MP4).
+Sudah jalan:
+timeline, potong, hapus, teks, efek, transisi, pisahkan audio, seret audio dengan tempelan otomatis,
+undo/redo, impor berkas (tombol, seret ke jendela, atau argumen program),
+pratinjau video asli lewat FFmpeg termasuk efek dan transisi.
+Klip contoh bawaan tidak punya berkas, jadi digambar oleh `preview::paint_scene`.
+
+Cara kerja pratinjau video: `video::VideoPool` menjalankan FFmpeg per klip yang tampil, membaca piksel mentah
+dari pipa, dan memulai ulang proses saat garis oranye mundur atau melompat jauh. Efek diterapkan oleh
+`ffmpeg::video_filter`; ekspor nanti wajib memakai fungsi yang sama supaya hasilnya identik dengan pratinjau.
 
 Belum ada, urut prioritas:
-1. Memutar video asli di pratinjau (FFmpeg, tautan dinamis, build LGPL: jangan pakai `--enable-gpl`
-   atau `--enable-nonfree`, hindari libx264). Yang diganti hanya `preview::paint_scene`.
-2. Ekspor MP4 (jendela Ekspor sudah ada, tombolnya masih nonaktif).
-3. Memutar suara.
-4. Simpan dan buka proyek.
-5. Memindah dan mengubah panjang teks serta klip dengan seret; zoom timeline.
-6. Teks yang waktunya bertumpuk masih digambar bertumpuk di satu baris.
+1. Ekspor MP4 (jendela Ekspor sudah ada, tombolnya masih nonaktif). Rakit satu perintah FFmpeg.
+   Build LGPL tidak punya libx264; pakai encoder yang tersedia di build itu.
+2. Memutar suara.
+3. Simpan dan buka proyek.
+4. Memindah dan mengubah panjang teks serta klip dengan seret; zoom timeline.
+5. Teks yang waktunya bertumpuk masih digambar bertumpuk di satu baris.
+6. Video selalu dipaskan ke bingkai (ada tepi hitam); belum ada pilihan "penuhi bingkai".
 7. Distribusi: ZIP portabel lewat winget, lalu tanda tangan gratis SignPath Foundation.
