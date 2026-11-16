@@ -8,9 +8,9 @@ use eframe::egui::{
     self, Align, Align2, Color32, CursorIcon, FontId, Frame, Layout, Margin, Painter, Pos2, Rect,
     Sense, Stroke, StrokeKind, Ui,
 };
-use oxidecut_core::{AudioItem, AudioKind, ClipAudio, Effect, Ms, Timeline};
+use oxidecut_core::{AudioItem, AudioKind, ClipAudio, Effect, Id, Ms, Timeline, MIN_PIECE_MS};
 
-use crate::app::{App, AudioDrag, Selection};
+use crate::app::{App, Drag, DragKind, Selection};
 use crate::icons;
 use crate::labels;
 use crate::theme;
@@ -23,7 +23,10 @@ const VIDEO_ROW_HEIGHT: f32 = 50.0;
 const LANE_HEIGHT: f32 = 22.0;
 const ROW_GAP: f32 = 4.0;
 
-/// Audio yang diseret menempel ke tepi terdekat dalam jarak ini (piksel).
+/// Lebar pegangan di tepi item untuk memangkas (piksel).
+const HANDLE_WIDTH: f32 = 7.0;
+
+/// Item yang diseret menempel ke tepi terdekat dalam jarak ini (piksel).
 const SNAP_PIXELS: f32 = 8.0;
 
 pub fn show(app: &mut App, ui: &mut Ui) {
@@ -91,7 +94,10 @@ fn toolbar(app: &mut App, ui: &mut Ui) {
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            widgets::hint(ui, "Klik penggaris waktu untuk memindah garis oranye");
+            widgets::hint(
+                ui,
+                "Seret item untuk menggeser, seret tepinya untuk memangkas",
+            );
         });
     });
 }
@@ -188,6 +194,7 @@ fn tracks(app: &mut App, ui: &mut Ui) {
     video_clips(app, ui, &painter, &tracks, &tl);
     junction_buttons(app, ui, &painter, &tracks, &tl);
     audio_items(app, ui, &painter, &tracks, &tl);
+    paint_drag(app, &painter, &tracks, &tl);
     paint_playhead(&painter, &tracks, app.playhead);
 }
 
@@ -270,51 +277,85 @@ fn ruler(app: &mut App, ui: &mut Ui, painter: &Painter, tracks: &Tracks) {
     }
 }
 
+/// Keterangan sebuah item yang dibutuhkan untuk memulai seret.
+struct ItemInfo {
+    item: Selection,
+    start: Ms,
+    len: Ms,
+    /// Lajur audio; 0 untuk klip dan teks.
+    lane: u8,
+    /// Panjang terbesar kalau tepi kiri yang diseret.
+    max_len_from_start: Ms,
+    /// Panjang terbesar kalau tepi kanan yang diseret.
+    max_len_from_end: Ms,
+}
+
 fn text_items(app: &mut App, ui: &mut Ui, painter: &Painter, tracks: &Tracks, tl: &Timeline) {
     for text in tl.texts() {
+        let item = Selection::Text(text.id);
         let rect = tracks.span(tracks.text_row, text.start, text.len);
-        let response = ui.interact(rect, ui.scope_id().with(("text", text.id)), Sense::click());
-        if response.clicked() {
-            app.selection = Selection::Text(text.id);
-        }
-        let selected = app.selection == Selection::Text(text.id);
-        let label = if text.text.is_empty() {
-            "Teks"
-        } else {
-            text.text.as_str()
+        let end = text.start + text.len;
+        let info = ItemInfo {
+            item,
+            start: text.start,
+            len: text.len,
+            lane: 0,
+            // Ke kiri sampai waktu nol; ke kanan sampai ujung timeline.
+            max_len_from_start: end,
+            max_len_from_end: tl.duration().max(end) - text.start,
         };
-        paint_item(painter, rect, theme::TEXT_ITEM, selected, label, 8.0);
+        item_interaction(app, ui, tracks, tl, rect, &info);
+
+        if !is_dragged(app, item) {
+            let selected = app.selection == item;
+            let label = if text.text.is_empty() {
+                "Teks"
+            } else {
+                text.text.as_str()
+            };
+            paint_item(painter, rect, theme::TEXT_ITEM, selected, label, 8.0);
+        }
     }
 }
 
 fn video_clips(app: &mut App, ui: &mut Ui, painter: &Painter, tracks: &Tracks, tl: &Timeline) {
     for (start, clip) in tl.clip_spans() {
+        let item = Selection::Clip(clip.id);
         let rect = tracks.span(tracks.video_row, start, clip.len);
-        let response = ui.interact(rect, ui.scope_id().with(("clip", clip.id)), Sense::click());
-        if response.clicked() {
-            app.selection = Selection::Clip(clip.id);
-        }
-        let selected = app.selection == Selection::Clip(clip.id);
+        let info = ItemInfo {
+            item,
+            start,
+            len: clip.len,
+            lane: 0,
+            // Klip hanya bisa dipanjangkan selama berkas sumbernya masih ada isinya.
+            max_len_from_start: clip.source_in + clip.len,
+            max_len_from_end: clip.source_len.saturating_sub(clip.source_in),
+        };
+        item_interaction(app, ui, tracks, tl, rect, &info);
 
-        // Nama klip, lalu keterangan singkat keadaannya.
-        let mut label = clip.name.clone();
-        if clip.effect != Effect::None {
-            label.push_str(&format!("  ·  {}", labels::effect(clip.effect)));
+        if !is_dragged(app, item) {
+            let selected = app.selection == item;
+
+            // Nama klip, lalu keterangan singkat keadaannya.
+            let mut label = clip.name.clone();
+            if clip.effect != Effect::None {
+                label.push_str(&format!("  ·  {}", labels::effect(clip.effect)));
+            }
+            match clip.audio {
+                ClipAudio::Attached | ClipAudio::NoAudio => {}
+                ClipAudio::Detached { .. } => label.push_str("  ·  Audio dipisah"),
+                ClipAudio::Removed => label.push_str("  ·  Tanpa suara"),
+            }
+            // Nama digeser ke kanan supaya tidak tertutup tombol sambungan.
+            paint_item(
+                painter,
+                rect,
+                theme::tint_flat(clip.tint),
+                selected,
+                &label,
+                18.0,
+            );
         }
-        match clip.audio {
-            ClipAudio::Attached | ClipAudio::NoAudio => {}
-            ClipAudio::Detached { .. } => label.push_str("  ·  Audio dipisah"),
-            ClipAudio::Removed => label.push_str("  ·  Tanpa suara"),
-        }
-        // Nama digeser ke kanan supaya tidak tertutup tombol sambungan.
-        paint_item(
-            painter,
-            rect,
-            theme::tint_flat(clip.tint),
-            selected,
-            &label,
-            18.0,
-        );
     }
 }
 
@@ -370,86 +411,24 @@ fn junction_buttons(app: &mut App, ui: &mut Ui, painter: &Painter, tracks: &Trac
 
 fn audio_items(app: &mut App, ui: &mut Ui, painter: &Painter, tracks: &Tracks, tl: &Timeline) {
     for audio in tl.audios() {
+        let item = Selection::Audio(audio.id);
         let lane = tracks.lanes[audio.lane as usize % tracks.lanes.len()];
         let rect = tracks.span(lane, audio.start, audio.len);
-        let response = ui
-            .interact(
-                rect,
-                ui.scope_id().with(("audio", audio.id)),
-                Sense::click_and_drag(),
-            )
-            .on_hover_cursor(CursorIcon::Grab);
-
-        if response.clicked() {
-            app.selection = Selection::Audio(audio.id);
-        }
-
-        if response.drag_started() {
-            // Titik tempat tombol tetikus pertama ditekan.
-            let pressed_at = ui
-                .input(|i| i.pointer.press_origin())
-                .unwrap_or(rect.left_center());
-            app.playing = false;
-            app.selection = Selection::Audio(audio.id);
-            app.audio_drag = Some(AudioDrag {
-                id: audio.id,
-                grab_offset_x: pressed_at.x - rect.left(),
-                start: audio.start,
-                lane: audio.lane,
-                snapped_to: None,
-            });
-        }
-
-        if response.dragged() {
-            if let Some(pointer) = response.interact_pointer_pos() {
-                update_audio_drag(app, tracks, tl, audio, pointer);
-            }
-        }
-
-        if response.drag_stopped() {
-            if let Some(drag) = app.audio_drag.take() {
-                let moved = drag.start != audio.start || drag.lane != audio.lane;
-                if drag.id == audio.id && moved {
-                    app.move_audio(drag.id, drag.start, drag.lane);
-                }
-            }
-        }
-
-        let being_dragged = match &app.audio_drag {
-            Some(drag) => drag.id == audio.id,
-            None => false,
+        let info = ItemInfo {
+            item,
+            start: audio.start,
+            len: audio.len,
+            lane: audio.lane,
+            // Ke kiri butuh ruang di timeline dan di berkas sumber.
+            max_len_from_start: audio.start.min(audio.source_in) + audio.len,
+            max_len_from_end: audio.source_len.saturating_sub(audio.source_in),
         };
-        if !being_dragged {
-            let selected = app.selection == Selection::Audio(audio.id);
-            paint_item(
-                painter,
-                rect,
-                audio_color(audio),
-                selected,
-                &labels::audio_name(audio),
-                8.0,
-            );
-        }
-    }
+        item_interaction(app, ui, tracks, tl, rect, &info);
 
-    // Potongan yang sedang diseret digambar paling akhir supaya berada di atas.
-    if let Some(drag) = &app.audio_drag {
-        if let Some(audio) = tl.audio(drag.id) {
-            let lane = tracks.lanes[drag.lane as usize % tracks.lanes.len()];
-            let rect = tracks.span(lane, drag.start, audio.len);
-            let label = format!(
-                "{}  ·  detik {}",
-                labels::audio_name(audio),
-                labels::seconds_number(drag.start)
-            );
-            paint_item(painter, rect, audio_color(audio), true, &label, 8.0);
-
-            if let Some(point) = drag.snapped_to {
-                let x = tracks.x(point as f64);
-                let top = tracks.ruler.top();
-                let bottom = tracks.lanes[1].bottom();
-                painter.vline(x, top..=bottom, Stroke::new(1.0, theme::TEXT));
-            }
+        if !is_dragged(app, item) {
+            let selected = app.selection == item;
+            let name = labels::audio_name(audio);
+            paint_item(painter, rect, audio_color(audio), selected, &name, 8.0);
         }
     }
 }
@@ -461,63 +440,332 @@ fn audio_color(audio: &AudioItem) -> Color32 {
     }
 }
 
-/// Menghitung posisi calon audio yang sedang diseret: waktu, lajur, dan tempelan.
-fn update_audio_drag(
+fn is_dragged(app: &App, item: Selection) -> bool {
+    match &app.drag {
+        Some(drag) => drag.item == item,
+        None => false,
+    }
+}
+
+// ------------------------------------------------------------------ seret
+//
+// Semua item (klip, teks, audio) memakai mekanisme seret yang sama:
+// - seret badan  = geser
+// - seret tepi   = pangkas (trim)
+// Selama diseret, hanya "calon" di `app.drag` yang berubah dan digambar.
+// Timeline baru diubah saat tetikus dilepas, lewat `App::finish_drag`.
+
+/// Menangani klik, seret badan, dan seret tepi untuk satu item.
+fn item_interaction(
     app: &mut App,
+    ui: &mut Ui,
     tracks: &Tracks,
     tl: &Timeline,
-    audio: &AudioItem,
-    pointer: Pos2,
+    rect: Rect,
+    info: &ItemInfo,
 ) {
+    let salt = match info.item {
+        Selection::Clip(id) => ("clip", id),
+        Selection::Text(id) => ("text", id),
+        Selection::Audio(id) => ("audio", id),
+        Selection::Junction(id) => ("junction-item", id),
+        Selection::None => ("none", 0),
+    };
+    let id = ui.scope_id().with(salt);
+
+    // Tepi kiri dan kanan adalah pegangan untuk memangkas.
+    // Pada item yang sempit, pegangan mengecil supaya badannya tetap bisa dipegang.
+    let handle = HANDLE_WIDTH.min(rect.width() / 3.0);
+    let left_zone = Rect::from_min_max(rect.min, Pos2::new(rect.left() + handle, rect.bottom()));
+    let right_zone = Rect::from_min_max(Pos2::new(rect.right() - handle, rect.top()), rect.max);
+
+    let body = ui
+        .interact(rect, id.with("body"), Sense::click_and_drag())
+        .on_hover_cursor(CursorIcon::Grab);
+    let left = ui
+        .interact(left_zone, id.with("left"), Sense::click_and_drag())
+        .on_hover_cursor(CursorIcon::ResizeHorizontal);
+    let right = ui
+        .interact(right_zone, id.with("right"), Sense::click_and_drag())
+        .on_hover_cursor(CursorIcon::ResizeHorizontal);
+
+    if body.clicked() || left.clicked() || right.clicked() {
+        app.selection = info.item;
+    }
+
+    let parts = [
+        (&body, DragKind::Move),
+        (&left, DragKind::TrimStart),
+        (&right, DragKind::TrimEnd),
+    ];
+    for (response, kind) in parts {
+        if response.drag_started() {
+            let press_x = match ui.input(|i| i.pointer.press_origin()) {
+                Some(pos) => pos.x,
+                None => rect.center().x,
+            };
+            start_drag(app, info, kind, press_x);
+        }
+        if response.dragged() {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                update_drag(app, tracks, tl, pointer);
+            }
+        }
+        if response.drag_stopped() {
+            app.finish_drag();
+        }
+    }
+}
+
+fn start_drag(app: &mut App, info: &ItemInfo, kind: DragKind, press_x: f32) {
+    let max_len = match kind {
+        DragKind::Move => info.len,
+        DragKind::TrimStart => info.max_len_from_start,
+        DragKind::TrimEnd => info.max_len_from_end,
+    };
+    app.playing = false;
+    app.selection = info.item;
+    app.drag = Some(Drag {
+        item: info.item,
+        kind,
+        press_x,
+        origin_start: info.start,
+        origin_len: info.len,
+        max_len: max_len.max(info.len),
+        start: info.start,
+        len: info.len,
+        lane: info.lane,
+        insert_index: 0,
+        snapped_to: None,
+    });
+}
+
+/// Menghitung calon posisi dan panjang item yang sedang diseret.
+fn update_drag(app: &mut App, tracks: &Tracks, tl: &Timeline, pointer: Pos2) {
     let playhead = app.playhead_ms();
-    let Some(drag) = app.audio_drag.as_mut() else {
+    let Some(drag) = app.drag.as_mut() else {
         return;
     };
 
-    let len = audio.len as f64;
-    let max_start = tl.duration().saturating_sub(audio.len) as f64;
-    let raw_start = tracks
-        .time_at(pointer.x - drag.grab_offset_x)
-        .clamp(0.0, max_start);
+    // Seberapa jauh kursor sudah bergerak, dalam milidetik.
+    let moved = tracks.time_at(pointer.x) - tracks.time_at(drag.press_x);
+    // Jarak tempel, dalam milidetik.
+    let reach = (SNAP_PIXELS / tracks.pixels_per_ms()) as f64;
+    let points = snap_points(tl, drag.item, playhead);
 
-    // Titik waktu tempat tepi audio boleh menempel.
-    let mut snap_points: Vec<Ms> = vec![0, tl.video_len(), playhead];
-    for (clip_start, _) in tl.clip_spans() {
-        snap_points.push(clip_start);
-    }
-    for other in tl.audios() {
-        if other.id != audio.id {
-            snap_points.push(other.start);
-            snap_points.push(other.start + other.len);
-        }
-    }
+    let origin_start = drag.origin_start as f64;
+    let origin_len = drag.origin_len as f64;
+    let origin_end = origin_start + origin_len;
+    let shortest = MIN_PIECE_MS as f64;
+    let longest = drag.max_len as f64;
+    drag.snapped_to = None;
 
-    // Cari titik terdekat, baik untuk tepi kiri maupun tepi kanan audio.
-    let mut start = raw_start;
-    let mut snapped_to = None;
-    let mut nearest = (SNAP_PIXELS / tracks.pixels_per_ms()) as f64;
-    for point in snap_points {
-        let left_edge_here = point as f64;
-        let right_edge_here = point as f64 - len;
-        for candidate in [left_edge_here, right_edge_here] {
-            let distance = (candidate - raw_start).abs();
-            if distance < nearest && candidate >= 0.0 && candidate <= max_start {
-                nearest = distance;
-                start = candidate;
-                snapped_to = Some(point);
+    match drag.kind {
+        DragKind::Move => {
+            // Klip video: ikuti kursor, lalu hitung di urutan ke berapa ia akan mendarat.
+            if let Selection::Clip(id) = drag.item {
+                drag.start = (origin_start + moved).max(0.0) as Ms;
+                drag.insert_index = insert_index_at(tracks, tl, id, pointer.x);
+                return;
+            }
+
+            // Teks dan audio: bebas di sepanjang timeline, tepinya bisa menempel.
+            let last_start = (tl.duration() as f64 - origin_len).max(0.0);
+            let raw = (origin_start + moved).clamp(0.0, last_start);
+            let mut start = round_to_10(raw).min(last_start);
+            let mut nearest = reach;
+            for point in &points {
+                let left_edge_here = *point as f64;
+                let right_edge_here = *point as f64 - origin_len;
+                for candidate in [left_edge_here, right_edge_here] {
+                    let distance = (candidate - raw).abs();
+                    if distance < nearest && candidate >= 0.0 && candidate <= last_start {
+                        nearest = distance;
+                        start = candidate;
+                        drag.snapped_to = Some(*point);
+                    }
+                }
+            }
+            drag.start = start.round() as Ms;
+
+            if let Selection::Audio(_) = drag.item {
+                let lane_boundary = (tracks.lanes[0].bottom() + tracks.lanes[1].top()) / 2.0;
+                drag.lane = if pointer.y < lane_boundary { 0 } else { 1 };
             }
         }
+
+        DragKind::TrimStart => {
+            // Tepi kiri bergerak, tepi kanan diam.
+            let mut len = round_to_10(origin_len - moved).clamp(shortest, longest);
+            if let Some(point) = nearest_point(origin_end - len, &points, reach) {
+                let snapped_len = origin_end - point as f64;
+                if snapped_len >= shortest && snapped_len <= longest {
+                    len = snapped_len;
+                    drag.snapped_to = Some(point);
+                }
+            }
+            drag.len = len.round() as Ms;
+            drag.start = (drag.origin_start + drag.origin_len).saturating_sub(drag.len);
+        }
+
+        DragKind::TrimEnd => {
+            // Tepi kanan bergerak, tepi kiri diam.
+            let mut len = round_to_10(origin_len + moved).clamp(shortest, longest);
+            if let Some(point) = nearest_point(origin_start + len, &points, reach) {
+                let snapped_len = point as f64 - origin_start;
+                if snapped_len >= shortest && snapped_len <= longest {
+                    len = snapped_len;
+                    drag.snapped_to = Some(point);
+                }
+            }
+            drag.len = len.round() as Ms;
+            drag.start = drag.origin_start;
+        }
+    }
+}
+
+/// Membulatkan ke 10 milidetik supaya angkanya rapi.
+fn round_to_10(ms: f64) -> f64 {
+    (ms / 10.0).round() * 10.0
+}
+
+/// Titik waktu tempat tepi item boleh menempel: awal timeline, akhir video,
+/// garis oranye, dan tepi semua item lain.
+fn snap_points(tl: &Timeline, dragged: Selection, playhead: Ms) -> Vec<Ms> {
+    let mut points = vec![0, tl.video_len(), playhead];
+    for (start, clip) in tl.clip_spans() {
+        if Selection::Clip(clip.id) != dragged {
+            points.push(start);
+            points.push(start + clip.len);
+        }
+    }
+    for text in tl.texts() {
+        if Selection::Text(text.id) != dragged {
+            points.push(text.start);
+            points.push(text.start + text.len);
+        }
+    }
+    for audio in tl.audios() {
+        if Selection::Audio(audio.id) != dragged {
+            points.push(audio.start);
+            points.push(audio.start + audio.len);
+        }
+    }
+    points
+}
+
+/// Titik tempel yang paling dekat dengan `time`, kalau ada yang berjarak kurang dari `reach`.
+fn nearest_point(time: f64, points: &[Ms], reach: f64) -> Option<Ms> {
+    let mut best = None;
+    let mut nearest = reach;
+    for point in points {
+        let distance = (*point as f64 - time).abs();
+        if distance < nearest {
+            nearest = distance;
+            best = Some(*point);
+        }
+    }
+    best
+}
+
+/// Urutan tempat klip yang diseret akan mendarat: jumlah klip lain yang
+/// titik tengahnya berada di kiri kursor.
+fn insert_index_at(tracks: &Tracks, tl: &Timeline, dragged: Id, pointer_x: f32) -> usize {
+    let mut index = 0;
+    for (start, clip) in tl.clip_spans() {
+        if clip.id == dragged {
+            continue;
+        }
+        let center_x = tracks.x((start + clip.len / 2) as f64);
+        if center_x < pointer_x {
+            index += 1;
+        }
+    }
+    index
+}
+
+/// Waktu di timeline tempat penanda sisip digambar untuk urutan `index`.
+fn insert_marker_time(tl: &Timeline, dragged: Id, index: usize) -> Ms {
+    // Tidak berpindah: penanda di awal klip itu sendiri.
+    if tl.clip_index(dragged) == Some(index) {
+        return tl.clip_start(index);
+    }
+    let mut position = 0;
+    let mut end_of_last = 0;
+    for (start, clip) in tl.clip_spans() {
+        if clip.id == dragged {
+            continue;
+        }
+        if position == index {
+            return start;
+        }
+        position += 1;
+        end_of_last = start + clip.len;
+    }
+    end_of_last
+}
+
+/// Menggambar item yang sedang diseret pada posisi calonnya, paling atas.
+fn paint_drag(app: &App, painter: &Painter, tracks: &Tracks, tl: &Timeline) {
+    let Some(drag) = &app.drag else {
+        return;
+    };
+
+    let (row, fill, name) = match drag.item {
+        Selection::Clip(id) => match tl.clip(id) {
+            Some(clip) => (
+                tracks.video_row,
+                theme::tint_flat(clip.tint),
+                clip.name.clone(),
+            ),
+            None => return,
+        },
+        Selection::Text(id) => match tl.text(id) {
+            Some(text) => (tracks.text_row, theme::TEXT_ITEM, text.text.clone()),
+            None => return,
+        },
+        Selection::Audio(id) => match tl.audio(id) {
+            Some(audio) => {
+                let lane = tracks.lanes[drag.lane as usize % tracks.lanes.len()];
+                (lane, audio_color(audio), labels::audio_name(audio))
+            }
+            None => return,
+        },
+        Selection::Junction(_) | Selection::None => return,
+    };
+
+    let moving_clip = drag.kind == DragKind::Move && matches!(drag.item, Selection::Clip(_));
+
+    // Keterangan: saat digeser tampilkan waktunya, saat dipangkas tampilkan panjangnya.
+    let label = if moving_clip {
+        name
+    } else if drag.kind == DragKind::Move {
+        format!("{name}  ·  detik {}", labels::seconds_number(drag.start))
+    } else {
+        format!("{name}  ·  {}", labels::seconds(drag.len))
+    };
+
+    let rect = tracks.span(row, drag.start, drag.len);
+    let fill = if moving_clip {
+        fill.gamma_multiply(0.85)
+    } else {
+        fill
+    };
+    paint_item(painter, rect, fill, true, &label, 8.0);
+
+    // Klip yang digeser: garis tebal menunjukkan di mana ia akan mendarat.
+    if let (Selection::Clip(id), true) = (drag.item, moving_clip) {
+        let x = tracks.x(insert_marker_time(tl, id, drag.insert_index) as f64);
+        painter.vline(x, row.y_range(), Stroke::new(3.0, theme::TEXT));
     }
 
-    // Tanpa tempelan, bulatkan ke 10 ms supaya angkanya rapi.
-    if snapped_to.is_none() {
-        start = ((start / 10.0).round() * 10.0).min(max_start);
+    // Garis tipis menunjukkan tempat tepi item menempel.
+    if let Some(point) = drag.snapped_to {
+        let x = tracks.x(point as f64);
+        let top = tracks.ruler.top();
+        let bottom = tracks.lanes[1].bottom();
+        painter.vline(x, top..=bottom, Stroke::new(1.0, theme::TEXT));
     }
-
-    let lane_boundary = (tracks.lanes[0].bottom() + tracks.lanes[1].top()) / 2.0;
-    drag.start = start.round() as Ms;
-    drag.lane = if pointer.y < lane_boundary { 0 } else { 1 };
-    drag.snapped_to = snapped_to;
 }
 
 /// Menggambar satu item timeline: kotak berwarna dengan nama di dalamnya.
@@ -536,6 +784,15 @@ fn paint_item(
         Stroke::new(1.0, Color32::from_white_alpha(40))
     };
     painter.rect(rect, 5.0, fill, stroke, StrokeKind::Inside);
+
+    // Item terpilih menampilkan dua pegangan kecil di tepinya untuk memangkas.
+    if selected && rect.width() > 24.0 {
+        let bar = egui::vec2(3.0, rect.height() * 0.5);
+        let left = Rect::from_center_size(rect.left_center() + egui::vec2(4.0, 0.0), bar);
+        let right = Rect::from_center_size(rect.right_center() - egui::vec2(4.0, 0.0), bar);
+        painter.rect_filled(left, 1.5, theme::TEXT);
+        painter.rect_filled(right, 1.5, theme::TEXT);
+    }
 
     // Nama dipotong di tepi kotak supaya tidak meluber ke item sebelah.
     let text_area = rect.shrink2(egui::vec2(6.0, 0.0));

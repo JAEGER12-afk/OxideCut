@@ -32,6 +32,8 @@ pub fn error(error: EditError) -> &'static str {
         EditError::AudioNotAttached => "Suara klip ini sudah dipisah atau dihapus",
         EditError::NotLinked => "Audio ini tidak punya klip video asal",
         EditError::NoJunction => "Klip terakhir tidak punya sambungan",
+        EditError::TooShort => "Tidak bisa lebih pendek lagi",
+        EditError::OutOfSource => "Isinya sudah habis, tidak bisa dipanjangkan lagi",
     }
 }
 

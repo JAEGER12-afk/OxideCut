@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use eframe::egui;
-use oxidecut_core::{AudioKind, Editor, Effect, Id, Ms, Timeline, Transition, AUDIO_LANES};
+use oxidecut_core::{AudioKind, Edge, Editor, Effect, Id, Ms, Timeline, Transition, AUDIO_LANES};
 
 use crate::labels;
 use crate::media::{self, MediaItem, MediaKind};
@@ -51,15 +51,40 @@ impl Ratio {
     }
 }
 
-/// Potongan audio yang sedang diseret di timeline.
-pub struct AudioDrag {
-    pub id: Id,
-    /// Jarak dari tepi kiri potongan ke titik yang dipegang kursor.
-    pub grab_offset_x: f32,
-    /// Posisi calon selama diseret (belum disimpan ke timeline).
+/// Cara sebuah item diseret.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DragKind {
+    /// Badan item diseret: item berpindah.
+    Move,
+    /// Tepi kiri diseret: item dipangkas dari depan.
+    TrimStart,
+    /// Tepi kanan diseret: item dipangkas dari belakang.
+    TrimEnd,
+}
+
+/// Item timeline yang sedang diseret.
+///
+/// Nilai "calon" di bawah hanya untuk digambar selama seret berlangsung.
+/// Timeline baru benar-benar diubah saat tetikus dilepas (`App::finish_drag`).
+pub struct Drag {
+    /// Item yang diseret: `Selection::Clip`, `Text`, atau `Audio`.
+    pub item: Selection,
+    pub kind: DragKind,
+    /// Posisi mendatar kursor saat tombol tetikus ditekan.
+    pub press_x: f32,
+    /// Waktu mulai dan panjang item saat mulai diseret.
+    pub origin_start: Ms,
+    pub origin_len: Ms,
+    /// Panjang terbesar yang diizinkan saat memangkas.
+    pub max_len: Ms,
+    /// Calon waktu mulai dan panjang.
     pub start: Ms,
+    pub len: Ms,
+    /// Calon lajur (hanya untuk audio).
     pub lane: u8,
-    /// Waktu tempat potongan sedang menempel, kalau ada.
+    /// Calon urutan (hanya untuk klip video yang digeser).
+    pub insert_index: usize,
+    /// Waktu tempat tepi item sedang menempel, kalau ada.
     pub snapped_to: Option<Ms>,
 }
 
@@ -71,7 +96,7 @@ pub struct App {
     pub playhead: f64,
     pub playing: bool,
     pub ratio: Ratio,
-    pub audio_drag: Option<AudioDrag>,
+    pub drag: Option<Drag>,
     /// Pemutar video asli untuk pratinjau.
     pub video: VideoPool,
     pub export_open: bool,
@@ -95,7 +120,7 @@ impl App {
             playhead: 3_000.0,
             playing: false,
             ratio: Ratio::Portrait,
-            audio_drag: None,
+            drag: None,
             video: VideoPool::new(),
             export_open: false,
             export_height: 1080,
@@ -369,6 +394,9 @@ impl App {
         let Some(item) = self.timeline().audio(audio) else {
             return;
         };
+        if item.start == start && item.lane == lane {
+            return;
+        }
         let name = labels::audio_name(item);
         let len = item.len;
 
@@ -394,6 +422,104 @@ impl App {
                 name,
                 labels::seconds_number(start)
             )),
+            Err(e) => self.say(labels::error(e)),
+        }
+    }
+
+    // ---- geser dan pangkas dengan seret ----
+
+    /// Dipanggil saat tetikus dilepas: menyimpan hasil seret ke timeline.
+    pub fn finish_drag(&mut self) {
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        let edge = match drag.kind {
+            DragKind::TrimStart => Edge::Start,
+            DragKind::TrimEnd | DragKind::Move => Edge::End,
+        };
+        let moving = drag.kind == DragKind::Move;
+
+        match drag.item {
+            Selection::Clip(id) if moving => self.move_clip(id, drag.insert_index),
+            Selection::Clip(id) => self.trim_clip(id, edge, drag.len),
+            Selection::Text(id) if moving => self.move_text(id, drag.start),
+            Selection::Text(id) => self.trim_text(id, edge, drag.len),
+            Selection::Audio(id) if moving => self.move_audio(id, drag.start, drag.lane),
+            Selection::Audio(id) => self.trim_audio(id, edge, drag.len),
+            Selection::Junction(_) | Selection::None => {}
+        }
+
+        // Timeline bisa memendek; pastikan garis oranye tidak tertinggal di luar.
+        self.set_playhead(self.playhead);
+    }
+
+    fn move_clip(&mut self, clip: Id, new_index: usize) {
+        let old_index = self.timeline().clip_index(clip);
+        let last_index = self.timeline().clips().len().saturating_sub(1);
+        if old_index == Some(new_index.min(last_index)) {
+            return;
+        }
+        match self.editor.edit(|tl| tl.move_clip(clip, new_index)) {
+            Ok(()) => self.say("Klip dipindah"),
+            Err(e) => self.say(labels::error(e)),
+        }
+    }
+
+    fn trim_clip(&mut self, clip: Id, edge: Edge, new_len: Ms) {
+        let unchanged = match self.timeline().clip(clip) {
+            Some(item) => item.len == new_len,
+            None => true,
+        };
+        if unchanged {
+            return;
+        }
+        match self.editor.edit(|tl| tl.trim_clip(clip, edge, new_len)) {
+            Ok(()) => self.say(format!("Panjang klip: {}", labels::seconds(new_len))),
+            Err(e) => self.say(labels::error(e)),
+        }
+    }
+
+    fn move_text(&mut self, text: Id, start: Ms) {
+        let unchanged = match self.timeline().text(text) {
+            Some(item) => item.start == start,
+            None => true,
+        };
+        if unchanged {
+            return;
+        }
+        match self.editor.edit(|tl| tl.move_text(text, start)) {
+            Ok(()) => self.say(format!(
+                "Teks dipindah ke detik {}",
+                labels::seconds_number(start)
+            )),
+            Err(e) => self.say(labels::error(e)),
+        }
+    }
+
+    fn trim_text(&mut self, text: Id, edge: Edge, new_len: Ms) {
+        let unchanged = match self.timeline().text(text) {
+            Some(item) => item.len == new_len,
+            None => true,
+        };
+        if unchanged {
+            return;
+        }
+        match self.editor.edit(|tl| tl.trim_text(text, edge, new_len)) {
+            Ok(()) => self.say(format!("Panjang teks: {}", labels::seconds(new_len))),
+            Err(e) => self.say(labels::error(e)),
+        }
+    }
+
+    fn trim_audio(&mut self, audio: Id, edge: Edge, new_len: Ms) {
+        let unchanged = match self.timeline().audio(audio) {
+            Some(item) => item.len == new_len,
+            None => true,
+        };
+        if unchanged {
+            return;
+        }
+        match self.editor.edit(|tl| tl.trim_audio(audio, edge, new_len)) {
+            Ok(()) => self.say(format!("Panjang audio: {}", labels::seconds(new_len))),
             Err(e) => self.say(labels::error(e)),
         }
     }

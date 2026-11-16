@@ -14,6 +14,6 @@ mod timeline;
 
 pub use editor::Editor;
 pub use timeline::{
-    Audible, AudioItem, AudioKind, Clip, ClipAudio, EditError, Effect, Id, Ms, TextItem, Timeline,
-    Transition, AUDIO_LANES, MIN_PIECE_MS,
+    Audible, AudioItem, AudioKind, Clip, ClipAudio, Edge, EditError, Effect, Id, Ms, TextItem,
+    Timeline, Transition, AUDIO_LANES, MIN_PIECE_MS,
 };
