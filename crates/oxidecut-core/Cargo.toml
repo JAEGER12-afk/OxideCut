@@ -1,0 +1,9 @@
+[package]
+name = "oxidecut-core"
+description = "Inti timeline OxideCut: model, operasi edit, undo/redo. Tanpa UI dan tanpa FFmpeg."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
