@@ -11,6 +11,8 @@ Ini versi awal. Yang sudah bisa dicoba:
 
 - Timeline dengan jalur Teks, Video, dan Audio
 - Potong, hapus, urungkan dan ulangi
+- Geser klip untuk menukar urutan, geser teks dan audio ke waktu mana pun
+- Pangkas (trim) klip, teks, dan audio dengan menyeret tepinya
 - Tambah teks (isi, ukuran, warna)
 - Efek dan transisi dengan contoh langsung
 - Pisahkan audio dari video, lalu seret audionya ke mana saja
@@ -40,6 +42,8 @@ dan hasilnya langsung terlihat di pratinjau.
 | Pasang transisi | klik + di sambungan klip, klik transisi |
 | Pasang efek | klik klip, klik efek |
 | Pisahkan audio | klik klip, klik Pisahkan audio |
+| Geser | seret badan item |
+| Pangkas (trim) | seret tepi kiri atau kanan item |
 
 Pintasan: Spasi (putar), Ctrl+Z dan Ctrl+Y, Delete, panah kiri dan kanan.
 

@@ -47,6 +47,12 @@ core mengubah `Timeline` atau menolak dengan `EditError` → `app.rs` menampilka
 - Suara klip: `Attached` (bawaan), `Detached { group }` (dipisah ke jalur Audio), `Removed`,
   atau `NoAudio` (berkasnya memang tanpa suara).
 - Audio terpisah bebas dipindah di dua lajur dan tidak boleh bertumpuk dalam satu lajur.
+- Pangkas (trim): `trim_clip`, `trim_text`, `trim_audio` menerima tepi (`Edge::Start`/`End`) dan panjang baru.
+  Klip dan audio tidak bisa dipanjangkan melebihi berkas sumbernya (`source_len`).
+- Memindah klip (`move_clip`) melepas transisi di sambungan yang ikut berubah.
+
+Seret di timeline: `timeline_view.rs` memakai satu mekanisme untuk semua item. Selama diseret hanya
+`App::drag` (calon posisi) yang berubah; timeline baru diubah di `App::finish_drag` saat tetikus dilepas.
 
 ## Perintah
 
@@ -63,8 +69,9 @@ Berkas yang ditulis setelah nama program langsung masuk panel Media: `oxidecut v
 ## Status
 
 Sudah jalan:
-timeline, potong, hapus, teks, efek, transisi, pisahkan audio, seret audio dengan tempelan otomatis,
-undo/redo, impor berkas (tombol, seret ke jendela, atau argumen program),
+timeline, potong, hapus, teks, efek, transisi, pisahkan audio, undo/redo,
+geser (klip menukar urutan; teks dan audio bebas) dan pangkas/trim lewat seret dengan tempelan otomatis,
+impor berkas (tombol, seret ke jendela, atau argumen program),
 pratinjau video asli lewat FFmpeg termasuk efek dan transisi.
 Klip contoh bawaan tidak punya berkas, jadi digambar oleh `preview::paint_scene`.
 
@@ -77,7 +84,7 @@ Belum ada, urut prioritas:
    Build LGPL tidak punya libx264; pakai encoder yang tersedia di build itu.
 2. Memutar suara.
 3. Simpan dan buka proyek.
-4. Memindah dan mengubah panjang teks serta klip dengan seret; zoom timeline.
+4. Zoom timeline. Saat klip dipangkas, pratinjau belum mengikuti tepi yang diseret.
 5. Teks yang waktunya bertumpuk masih digambar bertumpuk di satu baris.
 6. Video selalu dipaskan ke bingkai (ada tepi hitam); belum ada pilihan "penuhi bingkai".
 7. Distribusi: ZIP portabel lewat winget, lalu tanda tangan gratis SignPath Foundation.

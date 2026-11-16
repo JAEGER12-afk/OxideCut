@@ -50,6 +50,13 @@ impl Transition {
     ];
 }
 
+/// Tepi sebuah item: awal (kiri) atau akhir (kanan). Dipakai saat memangkas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Start,
+    End,
+}
+
 /// Keadaan suara bawaan sebuah klip video.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClipAudio {
@@ -72,6 +79,8 @@ pub struct Clip {
     pub source: Option<PathBuf>,
     /// Titik mulai di dalam berkas sumber.
     pub source_in: Ms,
+    /// Panjang seluruh berkas sumber. Klip tidak bisa dipanjangkan melebihi ini.
+    pub source_len: Ms,
     pub len: Ms,
     /// Indeks warna untuk tampilan sementara sebelum ada pratinjau video asli.
     pub tint: u8,
@@ -109,6 +118,8 @@ pub struct AudioItem {
     pub name: String,
     pub source: Option<PathBuf>,
     pub source_in: Ms,
+    /// Panjang seluruh berkas sumber.
+    pub source_len: Ms,
     pub start: Ms,
     pub len: Ms,
     pub lane: u8,
@@ -140,6 +151,10 @@ pub enum EditError {
     NotLinked,
     /// Klip terakhir tidak punya sambungan untuk transisi.
     NoJunction,
+    /// Hasil pangkas lebih pendek dari batas terkecil.
+    TooShort,
+    /// Dipanjangkan melebihi isi berkas sumber, atau sebelum waktu nol.
+    OutOfSource,
 }
 
 impl fmt::Display for EditError {
@@ -153,6 +168,8 @@ impl fmt::Display for EditError {
             EditError::AudioNotAttached => "clip audio is not attached",
             EditError::NotLinked => "audio has no source clip to rejoin",
             EditError::NoJunction => "last clip has no junction for a transition",
+            EditError::TooShort => "item would become too short",
+            EditError::OutOfSource => "not enough source material to extend that far",
         };
         f.write_str(s)
     }
@@ -332,12 +349,14 @@ impl Timeline {
         source: Option<PathBuf>,
     ) -> Id {
         let id = self.fresh_id();
+        let len = len.max(MIN_PIECE_MS);
         self.clips.push(Clip {
             id,
             name: name.into(),
             source,
             source_in: 0,
-            len: len.max(MIN_PIECE_MS),
+            source_len: len,
+            len,
             tint,
             effect: Effect::None,
             audio: ClipAudio::Attached,
@@ -378,6 +397,56 @@ impl Timeline {
         let removed = self.clips.remove(index);
         self.normalize();
         Ok(removed)
+    }
+
+    /// Memindah klip ke urutan `new_index` (0 = paling awal).
+    ///
+    /// Transisi di sambungan yang ikut berubah dilepas: sambungan lama di kiri
+    /// dan kanan klip, serta sambungan yang kini disisipi klip ini.
+    pub fn move_clip(&mut self, id: Id, new_index: usize) -> Result<(), EditError> {
+        let old_index = self.clip_index(id).ok_or(EditError::NotFound)?;
+        let new_index = new_index.min(self.clips.len() - 1);
+        if new_index == old_index {
+            return Ok(());
+        }
+
+        if old_index > 0 {
+            self.clips[old_index - 1].transition_out = None;
+        }
+        let mut clip = self.clips.remove(old_index);
+        clip.transition_out = None;
+        if new_index > 0 {
+            self.clips[new_index - 1].transition_out = None;
+        }
+        self.clips.insert(new_index, clip);
+        self.normalize();
+        Ok(())
+    }
+
+    /// Memangkas klip: mengubah panjangnya menjadi `new_len` dengan menggeser tepi `edge`.
+    /// Klip sesudahnya otomatis merapat karena jalur video tidak punya celah.
+    pub fn trim_clip(&mut self, id: Id, edge: Edge, new_len: Ms) -> Result<(), EditError> {
+        let clip = self.clip_mut(id)?;
+        if new_len < MIN_PIECE_MS {
+            return Err(EditError::TooShort);
+        }
+        match edge {
+            Edge::End => {
+                if clip.source_in + new_len > clip.source_len {
+                    return Err(EditError::OutOfSource);
+                }
+            }
+            Edge::Start => {
+                // Tepi akhir tetap menunjuk titik sumber yang sama; titik awalnya yang bergeser.
+                let source_end = clip.source_in + clip.len;
+                if new_len > source_end {
+                    return Err(EditError::OutOfSource);
+                }
+                clip.source_in = source_end - new_len;
+            }
+        }
+        clip.len = new_len;
+        Ok(())
     }
 
     pub fn set_effect(&mut self, id: Id, effect: Effect) -> Result<(), EditError> {
@@ -439,6 +508,29 @@ impl Timeline {
             .ok_or(EditError::NotFound)
     }
 
+    /// Memindah teks ke waktu `start`.
+    pub fn move_text(&mut self, id: Id, start: Ms) -> Result<(), EditError> {
+        self.text_mut(id)?.start = start;
+        Ok(())
+    }
+
+    /// Memangkas teks: mengubah panjangnya menjadi `new_len` dengan menggeser tepi `edge`.
+    pub fn trim_text(&mut self, id: Id, edge: Edge, new_len: Ms) -> Result<(), EditError> {
+        let text = self.text_mut(id)?;
+        if new_len < MIN_PIECE_MS {
+            return Err(EditError::TooShort);
+        }
+        if edge == Edge::Start {
+            let end = text.start + text.len;
+            if new_len > end {
+                return Err(EditError::OutOfSource);
+            }
+            text.start = end - new_len;
+        }
+        text.len = new_len;
+        Ok(())
+    }
+
     pub fn delete_text(&mut self, id: Id) -> Result<TextItem, EditError> {
         let index = self
             .texts
@@ -473,6 +565,7 @@ impl Timeline {
             name: name.into(),
             source,
             source_in: 0,
+            source_len: len,
             start,
             len,
             lane,
@@ -503,6 +596,7 @@ impl Timeline {
             name: clip.name.clone(),
             source: clip.source.clone(),
             source_in: clip.source_in,
+            source_len: clip.source_len,
             start,
             len,
             lane,
@@ -557,6 +651,43 @@ impl Timeline {
         let a = self.audio_mut(id)?;
         a.start = start;
         a.lane = lane;
+        Ok(())
+    }
+
+    /// Memangkas audio: mengubah panjangnya menjadi `new_len` dengan menggeser tepi `edge`.
+    pub fn trim_audio(&mut self, id: Id, edge: Edge, new_len: Ms) -> Result<(), EditError> {
+        let audio = self.audio(id).ok_or(EditError::NotFound)?;
+        if new_len < MIN_PIECE_MS {
+            return Err(EditError::TooShort);
+        }
+
+        let mut start = audio.start;
+        let mut source_in = audio.source_in;
+        match edge {
+            Edge::End => {
+                if source_in + new_len > audio.source_len {
+                    return Err(EditError::OutOfSource);
+                }
+            }
+            Edge::Start => {
+                // Memanjangkan ke kiri butuh ruang di timeline dan di berkas sumber.
+                let end = audio.start + audio.len;
+                let source_end = audio.source_in + audio.len;
+                if new_len > end || new_len > source_end {
+                    return Err(EditError::OutOfSource);
+                }
+                start = end - new_len;
+                source_in = source_end - new_len;
+            }
+        }
+        if !self.lane_free(audio.lane, start, new_len, Some(id)) {
+            return Err(EditError::Overlap);
+        }
+
+        let audio = self.audio_mut(id)?;
+        audio.start = start;
+        audio.source_in = source_in;
+        audio.len = new_len;
         Ok(())
     }
 
@@ -847,6 +978,142 @@ mod tests {
         assert_eq!(t.detach_audio(a), Err(EditError::AudioNotAttached));
         t.restore_clip_audio(a).unwrap();
         assert_eq!(t.clip(a).unwrap().audio, ClipAudio::NoAudio);
+    }
+
+    #[test]
+    fn move_clip_reorders_and_keeps_total_length() {
+        let (mut t, [a, b, c]) = three_clips();
+        t.move_clip(c, 0).unwrap();
+        let order: Vec<Id> = t.clips().iter().map(|x| x.id).collect();
+        assert_eq!(order, vec![c, a, b]);
+        assert_eq!(t.video_len(), 12_000);
+
+        t.move_clip(c, 99).unwrap();
+        let order: Vec<Id> = t.clips().iter().map(|x| x.id).collect();
+        assert_eq!(order, vec![a, b, c]);
+        assert_eq!(t.move_clip(777, 0), Err(EditError::NotFound));
+    }
+
+    #[test]
+    fn move_clip_removes_transitions_on_changed_junctions_only() {
+        let mut t = Timeline::new();
+        let a = t.push_clip("A", 1000, 0, None);
+        let b = t.push_clip("B", 1000, 0, None);
+        let c = t.push_clip("C", 1000, 0, None);
+        let d = t.push_clip("D", 1000, 0, None);
+        let e = t.push_clip("E", 1000, 0, None);
+        for id in [a, b, c, d] {
+            t.set_transition(id, Some(Transition::Fade)).unwrap();
+        }
+        // B pindah ke antara D dan E: A B C D E menjadi A C D B E.
+        t.move_clip(b, 3).unwrap();
+        let order: Vec<Id> = t.clips().iter().map(|x| x.id).collect();
+        assert_eq!(order, vec![a, c, d, b, e]);
+        assert_eq!(t.clip(a).unwrap().transition_out, None); // sambungan A-B hilang
+        assert_eq!(t.clip(c).unwrap().transition_out, Some(Transition::Fade)); // C-D utuh
+        assert_eq!(t.clip(d).unwrap().transition_out, None); // D-E disisipi B
+        assert_eq!(t.clip(b).unwrap().transition_out, None);
+
+        // Memindah ke tempat yang sama tidak mengubah apa pun.
+        let before = t.clone();
+        t.move_clip(c, 1).unwrap();
+        assert_eq!(t, before);
+    }
+
+    #[test]
+    fn trim_clip_end_shortens_and_cannot_exceed_source() {
+        let (mut t, [a, b, _]) = three_clips();
+        t.trim_clip(a, Edge::End, 2500).unwrap();
+        assert_eq!(
+            (t.clip(a).unwrap().len, t.clip(a).unwrap().source_in),
+            (2500, 0)
+        );
+        // Klip berikutnya merapat.
+        assert_eq!(t.clip_at(2500).unwrap().1.id, b);
+        assert_eq!(t.video_len(), 10_500);
+
+        t.trim_clip(a, Edge::End, 4000).unwrap();
+        assert_eq!(t.trim_clip(a, Edge::End, 4001), Err(EditError::OutOfSource));
+        assert_eq!(t.trim_clip(a, Edge::End, 99), Err(EditError::TooShort));
+    }
+
+    #[test]
+    fn trim_clip_start_moves_source_in_and_can_be_undone_by_extending() {
+        let (mut t, [a, _, _]) = three_clips();
+        t.trim_clip(a, Edge::Start, 3000).unwrap();
+        let clip = t.clip(a).unwrap();
+        assert_eq!((clip.source_in, clip.len), (1000, 3000));
+
+        assert_eq!(
+            t.trim_clip(a, Edge::Start, 4001),
+            Err(EditError::OutOfSource)
+        );
+        t.trim_clip(a, Edge::Start, 4000).unwrap();
+        let clip = t.clip(a).unwrap();
+        assert_eq!((clip.source_in, clip.len), (0, 4000));
+    }
+
+    #[test]
+    fn split_pieces_can_be_extended_back_over_each_other() {
+        let (mut t, [a, _, _]) = three_clips();
+        let right = t.split_clip(1000).unwrap();
+        t.trim_clip(a, Edge::End, 4000).unwrap();
+        t.trim_clip(right, Edge::Start, 4000).unwrap();
+        assert_eq!(t.clip(right).unwrap().source_in, 0);
+        assert_eq!(t.video_len(), 16_000);
+    }
+
+    #[test]
+    fn text_moves_and_trims_from_both_edges() {
+        let (mut t, _) = three_clips();
+        let id = t.add_text(5000, 3000, "Halo");
+        t.move_text(id, 1000).unwrap();
+        assert_eq!(t.text(id).unwrap().start, 1000);
+
+        t.trim_text(id, Edge::End, 500).unwrap();
+        assert_eq!(
+            (t.text(id).unwrap().start, t.text(id).unwrap().len),
+            (1000, 500)
+        );
+
+        t.trim_text(id, Edge::Start, 1500).unwrap();
+        assert_eq!(
+            (t.text(id).unwrap().start, t.text(id).unwrap().len),
+            (0, 1500)
+        );
+        assert_eq!(
+            t.trim_text(id, Edge::Start, 1501),
+            Err(EditError::OutOfSource)
+        );
+        assert_eq!(t.trim_text(id, Edge::End, 50), Err(EditError::TooShort));
+    }
+
+    #[test]
+    fn trim_audio_respects_source_and_neighbours() {
+        let (mut t, _) = three_clips();
+        let music = t.add_music("Musik", 2000, 8000, None).unwrap();
+
+        t.trim_audio(music, Edge::Start, 6000).unwrap();
+        let m = t.audio(music).unwrap();
+        assert_eq!((m.start, m.source_in, m.len), (4000, 2000, 6000));
+
+        t.trim_audio(music, Edge::End, 3000).unwrap();
+        let m = t.audio(music).unwrap();
+        assert_eq!((m.start, m.source_in, m.len), (4000, 2000, 3000));
+        assert_eq!(
+            t.trim_audio(music, Edge::End, 6001),
+            Err(EditError::OutOfSource)
+        );
+
+        // Audio lain di lajur yang sama menghalangi pemanjangan.
+        let other = t.add_music("Lain", 0, 3000, None).unwrap();
+        assert_eq!(t.audio(other).unwrap().lane, 0);
+        assert_eq!(
+            t.trim_audio(music, Edge::Start, 5000),
+            Err(EditError::Overlap)
+        );
+        t.trim_audio(music, Edge::Start, 4000).unwrap();
+        assert_eq!(t.audio(music).unwrap().start, 3000);
     }
 
     #[test]
